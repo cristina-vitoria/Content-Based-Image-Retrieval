@@ -147,7 +147,7 @@ def retrive(histogramas, hist_referencia, n: int, caminhos, caminho_referencia: 
     resultados = []
 
     for i in range(n):
-        indice = indices_ordenados[i]
+        indice = indices_validos[indices_ordenados[i]]
         caminho = Path(caminhos[indice])
         resultados.append({
                     "caminho": caminho,
