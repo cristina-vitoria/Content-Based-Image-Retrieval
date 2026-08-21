@@ -12,7 +12,7 @@ def _hsv_histograma_regiao(regiao):
     v_quant = np.where(v > 170, 2, np.where(v > 84, 1, 0))
     indices = (h_quant.ravel() * 9) + (s_quant.ravel() * 3) + v_quant.ravel()
 
-    hist = np.bincount(indices, minlength=144).astype(np.float64)
+    hist = np.bincount(indices, minlength=144).astype(np.float32)
     hist = hist / np.sum(hist)
         
     return hist
@@ -32,7 +32,7 @@ def histograma_local(imagem, linhas, colunas):
             regiao = imagem.crop((x_inicio, y_inicio, x_fim, y_fim))
             histogramas.append(_hsv_histograma_regiao(regiao))
 
-    histograma = np.concatenate(histogramas).astype(np.float64)
+    histograma = np.concatenate(histogramas).astype(np.float32)
     return histograma / histograma.sum()
 
 def histograma_local_2x2(imagem):
@@ -46,7 +46,7 @@ def histograma_local_8x8(imagem):
 
 def histograma_cinza(imagem):
     imagem_cinza = imagem.convert('L')
-    hist = np.asarray(imagem_cinza.histogram(), dtype=np.float64)
+    hist = np.asarray(imagem_cinza.histogram(), dtype=np.float32)
 
     return hist / hist.sum()
 
@@ -78,7 +78,7 @@ def histograma_rgb_media(imagem):
 
     rgb_media = (r + g + b) // 3
     
-    hist = np.bincount(rgb_media.ravel(), minlength=256).astype(np.float64)
+    hist = np.bincount(rgb_media.ravel(), minlength=256).astype(np.float32)
             
     return hist / np.sum(hist)
 
@@ -107,7 +107,7 @@ def histograma_hsv_quantizado(imagem):
     
     indices_1d = (h_flat * 9) + (s_flat * 3) + v_flat
 
-    hist = np.bincount(indices_1d, minlength=144).astype(np.float64)
+    hist = np.bincount(indices_1d, minlength=144).astype(np.float32)
     hist = hist / np.sum(hist)
     
     return hist
@@ -121,40 +121,47 @@ def histogramas_da_pasta(pasta: str | Path, funcao_histograma):
     histogramas = []
     caminhos = []
 
-    for arquivo in pasta.iterdir():
-        if arquivo.is_file():
-            try:
-                imagem = Image.open(arquivo)
-                imagem = imagem
-                hist = funcao_histograma(imagem)
-                histogramas.append(hist)
-                caminhos.append(arquivo)
-            except Exception as e:
-                print(f"Erro ao processar {arquivo}: {e}")
+    caminhos_ordenados = sorted(
+        arquivo
+        for arquivo in pasta.iterdir()
+        if arquivo.is_file()
+    )
+
+    for arquivo in caminhos_ordenados:
+        try:
+            imagem = Image.open(arquivo)
+            hist = funcao_histograma(imagem)
+            histogramas.append(hist)
+            caminhos.append(arquivo)
+        except Exception as e:
+            print(f"Erro ao processar {arquivo}: {e}")
 
     return np.array(histogramas), caminhos
 
-def retrive(histogramas, hist_referencia, n: int, caminhos, caminho_referencia: str | Path):
-    distancias = np.linalg.norm(histogramas - hist_referencia, axis=1)
+def matriz_distancias(histogramas):
+    X = np.asarray(histogramas, dtype=np.float32)
+    sq = np.sum(X**2, axis=1)
+    d2 = sq[:, None] + sq[None, :] - 2 * (X @ X.T)
+    return np.sqrt(np.maximum(d2, 0))  # clip por causa de erro de arredondamento
 
-    indices_validos = [
-        i for i, caminho in enumerate(caminhos)
-        if Path(caminho).resolve() != Path(caminho_referencia).resolve()
-    ]
+def recuperar_top_n(distancias, indice_referencia, caminhos, n):
+    caminhos = list(caminhos)
+    indices_validos = np.arange(len(caminhos))
+    indices_validos = indices_validos[indices_validos != indice_referencia]
 
-    indices_ordenados = np.argsort(distancias[indices_validos])
+    distancia_ref = distancias[indice_referencia, indices_validos]
+    ordem = np.argsort(distancia_ref)[:n]
+    indices_top = indices_validos[ordem]
 
     resultados = []
-
-    for i in range(n):
-        indice = indices_validos[indices_ordenados[i]]
-        caminho = Path(caminhos[indice])
+    for idx in indices_top:
+        caminho = Path(caminhos[idx])
         resultados.append({
-                    "caminho": caminho,
-                    "nome": caminho.name,
-                    "classe": classe_imagem(caminho),
-                    "distancia": float(distancias[indice]),
-                })
+            "caminho": caminho,
+            "nome": caminho.name,
+            "classe": classe_imagem(caminho),
+            "distancia": float(distancias[indice_referencia, idx]),
+        })
 
     return resultados
 
@@ -179,19 +186,16 @@ def classe_predita(resultados):
         )
     )
 
-def avaliar_taxa_acerto(n, histogramas, caminhos_processados):
-
+def avaliar_taxa_acerto(n, distancias, caminhos_processados):
     acertos = 0
     detalhes = []
 
     for indice, caminho_consulta in enumerate(caminhos_processados):
-        hist_referencia = histogramas[indice]
-        resultados = retrive(
-            histogramas=histogramas,
-            hist_referencia=hist_referencia,
-            n=n,
+        resultados = recuperar_top_n(
+            distancias=distancias,
+            indice_referencia=indice,
             caminhos=caminhos_processados,
-            caminho_referencia=caminho_consulta,
+            n=n,
         )
 
         classe_real = classe_imagem(caminho_consulta)
@@ -240,42 +244,44 @@ def main():
     caminho_dir = Path(input("Digite o caminho para a pasta: "))
     caminho_referencia = Path(input("Digite o caminho para a imagem de referência: "))
     n = int(input("Digite o número de imagens a serem recuperadas: "))
-     
+
     descritores = {
-            "Histograma 3D RGB": histograma_3d,
-            "Histograma em tons de cinza": histograma_cinza,
-            "Histograma RGB médio": histograma_rgb_media,
-            "Histograma HSV quantizado": histograma_hsv_quantizado,
-            "Histograma local 2x2": histograma_local_2x2,
-            "Histograma local 4x4": histograma_local_4x4,
-            "Histograma local 8x8": histograma_local_8x8,
-        }
+        "Histograma 3D RGB": histograma_3d,
+        "Histograma em tons de cinza": histograma_cinza,
+        "Histograma RGB médio": histograma_rgb_media,
+        "Histograma HSV quantizado": histograma_hsv_quantizado,
+        "Histograma local 2x2": histograma_local_2x2,
+        "Histograma local 4x4": histograma_local_4x4,
+        "Histograma local 8x8": histograma_local_8x8,
+    }
 
     for nome_descritor, funcao in descritores.items():
-            print(f"\n{'=' * 70}\n{nome_descritor}\n{'=' * 70}")
-    
-            with Image.open(caminho_referencia) as imagem:
-                hist_referencia = funcao(imagem)
-    
-            histogramas, caminhos = histogramas_da_pasta(caminho_dir, funcao)
-            resultados = retrive(
-                histogramas=histogramas,
-                hist_referencia=hist_referencia,
-                n=n,
-                caminhos=caminhos,
-                caminho_referencia=caminho_referencia,
-            )
-            imprimir_resultados(resultados)
-            classe_real = classe_imagem(caminho_referencia)
-            classe_estimada = classe_predita(resultados)
-            acertou = classe_estimada == classe_real
-            print("\nResultado:")
-            print(f"Classe real: {classe_real}")
-            print(f"Classe estimada: {classe_estimada}")
-            print(f"Acertou: {'Sim' if acertou else 'Não'}")
-    
-            avaliacao = avaliar_taxa_acerto(n, histogramas, caminhos)
-            imprimir_avaliacao(avaliacao)
+        print(f"\n{'=' * 70}\n{nome_descritor}\n{'=' * 70}")
+
+        histogramas, caminhos = histogramas_da_pasta(caminho_dir, funcao)
+        distancias = matriz_distancias(histogramas)
+
+        caminhos_resolvidos = [caminho.resolve() for caminho in caminhos]
+        idx_ref = caminhos_resolvidos.index(caminho_referencia.resolve())
+
+        resultados = recuperar_top_n(
+            distancias=distancias,
+            indice_referencia=idx_ref,
+            caminhos=caminhos,
+            n=n,
+        )
+
+        imprimir_resultados(resultados)
+        classe_real = classe_imagem(caminho_referencia)
+        classe_estimada = classe_predita(resultados)
+        acertou = classe_estimada == classe_real
+        print("\nResultado:")
+        print(f"Classe real: {classe_real}")
+        print(f"Classe estimada: {classe_estimada}")
+        print(f"Acertou: {'Sim' if acertou else 'Não'}")
+
+        avaliacao = avaliar_taxa_acerto(n, distancias, caminhos)
+        imprimir_avaliacao(avaliacao)
 
 if __name__ == "__main__":
     main()
